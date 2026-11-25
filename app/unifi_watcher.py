@@ -12,12 +12,12 @@ Commands:
 import sys
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from unifi_core import (
     REQUESTS_OK, STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS,
-    STATE_FILE,
+    STATE_FILE, atomic_json,
     load_settings, fetch_all_products,
     is_available, get_price, check_slug,
     load_watched, save_watched, stock_history,
@@ -241,7 +241,7 @@ def _load_state():
 
 
 def _save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    atomic_json(STATE_FILE, state)
 
 
 def run_once():
@@ -255,22 +255,32 @@ def run_once():
         sys.exit(0)
 
     state = _load_state()
-    now   = datetime.now().isoformat()
+    now   = datetime.now(timezone.utc).isoformat()
+    failures = 0
 
     print(f"[{now}] Checking {len(watched)} item(s) — region: {STORE_REGIONS[region]['label']}")
 
     for item in watched:
         slug, title = item["slug"], item["title"]
         try:
-            in_stock, price = check_slug(slug, region)
+            in_stock, price = check_slug(slug, region, settings.get("max_retries", 3))
             price_str = f" ({price})" if price else ""
             status    = "IN STOCK" if in_stock else "out of stock"
             print(f"  {status:<16}  {title}{price_str}")
 
             stock_history.record_check(slug, title, in_stock, price)
 
-            was_in_stock = state.get(slug, {}).get("in_stock")
-            if in_stock and not was_in_stock:
+            previous = state.get(slug, {})
+            was_in_stock = previous.get("in_stock")
+            wants_alert = (
+                settings.get("ntfy_enabled", True)
+                and not item.get("muted", False)
+                and (
+                    not settings.get("alert_favourites_only", False)
+                    or item.get("favourite", False)
+                )
+            )
+            if in_stock and was_in_stock is False and wants_alert:
                 notify_ntfy(
                     f"IN STOCK: {title}",
                     f"{title} is now available{price_str}!",
@@ -279,13 +289,40 @@ def run_once():
                 )
                 print(f"  >>> Notification sent for {title}")
 
-            state[slug] = {"in_stock": in_stock, "last_checked": now}
+            def numeric_price(value):
+                try:
+                    cleaned = "".join(ch for ch in str(value) if ch.isdigit() or ch in ".-")
+                    return float(cleaned) if cleaned else None
+                except (TypeError, ValueError):
+                    return None
+
+            old_price = numeric_price(previous.get("price"))
+            new_price = numeric_price(price)
+            if (
+                wants_alert
+                and settings.get("price_drop_alerts", False)
+                and old_price is not None
+                and new_price is not None
+                and new_price < old_price
+            ):
+                notify_ntfy(
+                    f"PRICE DROP: {title}",
+                    f"{title} dropped from {previous.get('price')} to {price}!",
+                    settings,
+                    click_url=f"{store_home(region)}/products/{slug}",
+                )
+                print(f"  >>> Price-drop notification sent for {title}")
+
+            state[slug] = {"in_stock": in_stock, "last_checked": now, "price": price}
 
         except Exception as e:
+            failures += 1
             print(f"  WARNING  {title}: {e}")
 
     _save_state(state)
     print("Done.")
+    if failures:
+        raise SystemExit(1)
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -311,3 +348,4 @@ if __name__ == "__main__":
             main()
         except KeyboardInterrupt:
             print("\nStopped.")
+

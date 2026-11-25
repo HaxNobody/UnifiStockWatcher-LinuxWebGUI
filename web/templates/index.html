@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>UniFi Stock Watcher</title>
+  <link rel="icon" href="{{ url_for('static', filename='icon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='app.css', v='1.1.0') }}">
+</head>
+<body>
+  <div id="app" class="app-shell" data-demo="{{ '1' if demo else '0' }}">
+    <header class="app-header">
+      <div class="brand"><img src="{{ url_for('static', filename='icon.svg') }}" alt=""><strong>UniFi Stock Watcher</strong></div>
+      <div class="service-state">
+        <span id="status-dot" class="status-dot"></span><span id="status-label">Loading…</span><span id="next-check"></span>
+        <div class="menu-anchor">
+          <button id="more-button" class="icon-button" aria-label="Application menu" aria-haspopup="menu" aria-expanded="false">•••</button>
+          <div id="app-menu" class="popup-menu app-menu hidden" role="menu">
+            <button type="button" data-app-action="check">Check now</button>
+            <button type="button" data-app-action="diagnostics">Service diagnostics</button>
+            <button type="button" data-app-action="logs">View watcher activity</button>
+            <a href="https://github.com/thefyfy/UnifiStockWatcher" target="_blank" rel="noopener">Upstream project</a>
+          </div>
+        </div>
+      </div>
+    </header>
+    <nav class="tabs" aria-label="Main views">
+      <button class="tab active" data-tab="watch">Watch list</button>
+      <button class="tab" data-tab="history">History</button>
+      <button class="tab" data-tab="settings">Settings</button>
+    </nav>
+
+    <main>
+      <section id="watch-view" class="view active">
+        <div class="toolbar">
+          <button id="toggle-watch" class="button">Start watching</button>
+          <button id="add-products" class="button">Add products…</button>
+          <button id="check-now" class="button">Check now</button>
+          <span id="store-summary" class="toolbar-note"></span>
+        </div>
+        <div id="health-banner" class="health-banner hidden"><div><strong id="health-title"></strong><span id="health-detail"></span></div><button id="banner-diagnostics" class="button">View diagnostics</button></div>
+        <div id="notification-setup-banner" class="health-banner hidden"><div><strong>Get stock alerts on your phone</strong><span>Connect ntfy once, then receive alerts even with this page closed.</span></div><button id="setup-notifications" class="button">Set up notifications</button></div>
+        <div id="watch-content" class="watch-content"></div>
+        <section class="bottom-panel">
+          <div class="bottom-tabs"><button class="bottom-tab active" data-bottom="changes">Stock changes</button><button class="bottom-tab" data-bottom="activity">Activity</button><span id="session-count"></span><button id="clear-activity" class="text-button push-right">Clear</button></div>
+          <div id="changes-feed" class="activity-feed"></div>
+          <pre id="activity-feed" class="activity-feed hidden"></pre>
+        </section>
+      </section>
+
+      <section id="history-view" class="view">
+        <div class="toolbar history-toolbar">
+          <label class="checkbox"><input id="watched-only" type="checkbox"> Watched products only</label>
+          <input id="history-filter" class="filter-input" placeholder="Filter by product name">
+          <a class="button push-right" href="/api/history.csv">Export CSV…</a>
+          <button id="clear-history" class="button">Clear history</button>
+        </div>
+        <div id="history-stats" class="summary-line"></div>
+        <div class="table-card history-card">
+          <table><thead><tr><th>When</th><th>Product</th><th>Change</th><th>Price</th></tr></thead><tbody id="history-body"></tbody></table>
+        </div>
+      </section>
+
+      <section id="settings-view" class="view settings-view">
+        <h2>Watching</h2>
+        <div class="settings-card">
+          <label class="setting-row"><span><strong>Check the store every</strong><small>Each check reads the whole catalog, however many products you watch.</small></span><select id="poll-interval"><option value="60">1 minute</option><option value="120">2 minutes</option><option value="300">5 minutes</option><option value="600">10 minutes</option><option value="1800">30 minutes</option><option value="3600">1 hour</option></select></label>
+          <label class="setting-row"><span><strong>Store</strong><small>Prices and stock come from this regional store.</small></span><select id="region"></select></label>
+          <label class="setting-row"><span><strong>Start watching when the server starts</strong></span><input id="autostart" class="switch" type="checkbox"></label>
+        </div>
+        <h2>Notifications · ntfy</h2>
+        <div id="notification-settings" class="settings-card">
+          <div class="notification-intro"><p>The watcher sends an alert to a topic on your ntfy server. The ntfy app on your phone subscribes to that same server and topic.</p><p id="notification-setup-status" class="notification-status" role="status"></p></div>
+          <details id="ntfy-setup-guide" class="notification-guide">
+            <summary>Setup guide: connect your phone</summary>
+            <ol>
+              <li><strong>Choose ntfy.sh or your own server.</strong> The simplest option is <code>https://ntfy.sh</code>. No account is required for basic public topics. If you want an account, open <a href="https://ntfy.sh/signup" target="_blank" rel="noopener noreferrer">Create an ntfy account</a>, choose a username and password, and follow the prompts. This is a separate ntfy account, not a watcher login.</li>
+              <li><strong>Install ntfy on your phone.</strong> Get it from <a href="https://play.google.com/store/apps/details?id=io.heckel.ntfy" target="_blank" rel="noopener noreferrer">Google Play (Android)</a> or the <a href="https://apps.apple.com/app/ntfy/id1625396347" target="_blank" rel="noopener noreferrer">App Store (iPhone)</a>. Open the app and allow notifications.</li>
+              <li><strong>Choose your server and topic below.</strong> A topic is the name of your notification channel. Use <em>Generate topic</em> for a random name, or enter your own. You do not need to create a public topic elsewhere first.</li>
+              <li><strong>Subscribe on your phone.</strong> In ntfy, tap <em>+</em> or <em>Subscribe to topic</em>. Use exactly the server address and topic shown here, then subscribe. Keep the topic's spelling and capitalization the same. Merely signing into an account does not subscribe the phone.
+                <dl class="notification-subscription"><dt>Server</dt><dd id="ntfy-guide-server"></dd><dt>Topic</dt><dd id="ntfy-guide-topic"></dd></dl>
+                <button id="copy-ntfy-details" type="button" class="button">Copy subscription details</button>
+              </li>
+              <li><strong>Save and test.</strong> Choose your alert options, then use <em>Save settings &amp; send test</em>. Look for the test on your phone. A successful send confirms that ntfy accepted it; only your phone can confirm receipt. You can close this page afterward; the Linux watcher keeps running.</li>
+            </ol>
+            <p class="notification-note"><strong>Public-topic privacy:</strong> anyone who knows an unprotected topic can read messages or send messages to it. A random name makes it harder to guess, but does not make it access-controlled. Creating an account alone does not make the topic private. This build does not send ntfy passwords or access tokens, so use a topic that allows publishing without credentials.</p>
+            <details><summary>Own server, account-protected topics, and troubleshooting</summary>
+              <p>For your own ntfy server, use its base address on both the watcher and phone. Both devices must reach it. If it is reachable only over Tailscale, connect the phone to Tailscale too. Public ntfy.sh alerts need Internet access, but the phone does not need Tailscale just to receive them.</p>
+              <p>Accounts can be used with ntfy's own apps. Protected or reserved topics may require publisher credentials and a suitable server plan; they are not supported by this integration yet. A 401 or 403 response usually points to topic permissions. Do not put a password or token in the server URL.</p>
+              <p>If a test is accepted but nothing arrives, check the exact server and topic, the phone's notification permission, mute and Do Not Disturb settings, and its network connection. On Android, review ntfy's background or instant-delivery settings if delivery is delayed. Self-hosted iPhone delivery may need upstream push configuration on the ntfy server.</p>
+              <p><a href="https://docs.ntfy.sh/" target="_blank" rel="noopener noreferrer">ntfy getting started</a> · <a href="https://docs.ntfy.sh/subscribe/phone/" target="_blank" rel="noopener noreferrer">Phone setup</a> · <a href="https://docs.ntfy.sh/config/#ios-instant-notifications" target="_blank" rel="noopener noreferrer">Self-hosted iPhone delivery</a></p>
+            </details>
+          </details>
+          <label class="setting-row"><span><strong>Send ntfy notifications</strong><small>When a product on your watch list comes back in stock.</small></span><input id="ntfy-enabled" class="switch" type="checkbox"></label>
+          <label class="setting-row"><span><strong>Tell me when a price drops</strong><small>Keep every price change in history and send an alert when a watched product gets cheaper.</small></span><input id="price-drops" class="switch" type="checkbox"></label>
+          <label class="setting-row"><span><strong>Only for favorites</strong><small>Other products are still checked and kept in history.</small></span><input id="favorites-only" class="switch" type="checkbox"></label>
+          <label class="setting-row"><span><strong>ntfy server</strong><small>Base address only, without a topic. For example: https://ntfy.sh</small></span><input id="ntfy-url" class="setting-input" type="url" placeholder="https://ntfy.sh" autocomplete="off" spellcheck="false"></label>
+          <div class="setting-row"><span><strong>Topic</strong><small>A channel name, not a full URL. Generating a new one requires resubscribing your phone.</small></span><div class="notification-topic-controls"><input id="ntfy-topic" class="setting-input" aria-label="Topic" autocomplete="off" spellcheck="false"><button id="generate-ntfy-topic" type="button" class="button">Generate topic</button></div></div>
+          <label class="setting-row"><span><strong>Priority</strong><small>Phone settings still control sounds and Do Not Disturb.</small></span><select id="ntfy-priority"><option>min</option><option>low</option><option>default</option><option>high</option><option>max</option></select></label>
+          <div class="setting-row"><span><strong>Test your phone connection</strong><small>Saves all current settings, then sends one test even if automatic alerts are switched off.</small><small id="ntfy-test-result" role="status" aria-live="polite"></small></span><button id="test-alert" type="button" class="button">Save settings &amp; send test</button></div>
+        </div>
+        <h2>Appearance</h2>
+        <div class="settings-card">
+          <label class="setting-row"><span><strong>Theme</strong><small>Follow this device, or always use light or dark.</small></span><select id="theme"><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
+          <label class="setting-row"><span><strong>Accent color</strong><small>Buttons, switches and the selected tab.</small></span><select id="accent"><option value="blue">Blue</option><option value="green">Green</option><option value="purple">Purple</option><option value="orange">Orange</option></select></label>
+          <label class="setting-row"><span><strong>Text size</strong></span><select id="text-size"><option value="normal">Normal</option><option value="large">Large</option></select></label>
+        </div>
+        <div class="settings-actions"><span id="save-status"></span><button id="save-settings" class="button primary">Save settings</button></div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="catalog-dialog" class="catalog-dialog">
+    <form method="dialog" class="dialog-shell">
+      <header><h1>Add products</h1><span id="catalog-count"></span><button class="close-dialog icon-button" value="cancel" aria-label="Close">×</button></header>
+      <div class="catalog-filters"><input id="catalog-search" placeholder="Search products"><select id="catalog-category"><option value="">All categories</option></select><label class="checkbox"><input id="include-stock" type="checkbox"> Include products in stock</label></div>
+      <div class="table-card catalog-table"><table><thead><tr><th></th><th>Product</th><th>Category</th><th>Price</th><th>Status</th></tr></thead><tbody id="catalog-body"></tbody></table></div>
+      <footer><span id="selected-count">0 selected</span><button id="select-all" type="button" class="button">Select all shown</button><span class="push-right"></span><button class="button" value="cancel">Cancel</button><button id="confirm-add" type="button" class="button primary">Add to watch list</button></footer>
+    </form>
+  </dialog>
+
+  <div id="item-menu" class="popup-menu item-menu hidden" role="menu">
+    <button type="button" data-item-action="check">Check now</button>
+    <a data-item-action="open" target="_blank" rel="noopener">Open in store</a>
+    <button type="button" data-item-action="copy">Copy link</button>
+    <div class="menu-separator"></div>
+    <button type="button" data-item-action="favorite"></button>
+    <button type="button" data-item-action="mute"></button>
+    <button type="button" class="danger" data-item-action="remove">Remove from watch list</button>
+  </div>
+
+  <dialog id="diagnostics-dialog" class="diagnostics-dialog">
+    <div class="diagnostics-shell">
+      <header><div><h1>Service diagnostics</h1><p>Timer, last-run, and stored-check information from the Linux service.</p></div><button id="close-diagnostics" class="icon-button" aria-label="Close">×</button></header>
+      <dl class="diagnostics-grid">
+        <dt>Timer</dt><dd id="diag-timer"></dd>
+        <dt>Last timer trigger</dt><dd id="diag-last-trigger"></dd>
+        <dt>Next scheduled trigger</dt><dd id="diag-next-run"></dd>
+        <dt>Last service completion</dt><dd id="diag-last-run"></dd>
+        <dt>Last stored product check</dt><dd id="diag-last-data"></dd>
+        <dt>Last service result</dt><dd id="diag-result"></dd>
+        <dt>Web GUI version</dt><dd id="diag-version"></dd>
+      </dl>
+      <div class="diagnostics-note">Activity includes journal entries from before and after the web GUI was installed, subject to normal system journal retention.</div>
+      <footer><button id="diag-check" class="button">Check now</button><button id="diag-activity" class="button">View activity</button><button id="diag-refresh" class="button primary">Refresh</button></footer>
+    </div>
+  </dialog>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="{{ url_for('static', filename='app.js', v='1.3.0') }}" defer></script>
+</body>
+</html>

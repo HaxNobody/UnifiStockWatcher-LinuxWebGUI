@@ -1,154 +1,80 @@
-# UniFi Stock Watcher
+# UniFi Stock Watcher — Linux + web GUI
 
-A headless stock monitoring tool for the [Ubiquiti Store](https://store.ui.com). Runs on a Raspberry Pi as a cron job and sends push notifications to your iPhone via [ntfy](https://ntfy.sh) when a watched product comes back in stock.
+A Linux background service and browser interface for monitoring products in the
+Ubiquiti store. Add products, choose a region and check interval, and receive ntfy
+notifications when stock returns or prices drop. Includes favorites, muted items,
+history/CSV export, service diagnostics, readable logs, and an ntfy phone setup guide.
 
-Built with Python. No API key required — works by polling the public store page.
+## Install
 
-![Python](https://img.shields.io/badge/python-3.11+-blue)
-![Platform](https://img.shields.io/badge/platform-Raspberry%20Pi-red)
-![License](https://img.shields.io/badge/license-MIT-green)
+Requires Ubuntu or Debian with systemd, Python 3.10+, sudo/root access, and Internet
+access for packages, store checks, and public ntfy. Tailscale is optional and must
+already be installed and connected if you want remote Tailscale access.
 
-## Features
-
-- **Watch list monitoring** — Define the products you want to track in a simple JSON file
-- **iPhone push notifications via ntfy** — Instant alert with product name, price, and a tap-to-open link to the store page
-- **Smart state tracking** — Only notifies on transitions (out of stock → available), no duplicate alerts
-- **Product browser** — One-shot script to list the full catalog with slugs, filterable by status, category, or name
-- **Multi-region support** — US, EU, UK, and Canada stores
-- **Stock history** — Persistent log of every check with statistics
-- **Cron-friendly** — Runs once and exits; the OS handles scheduling
-
-## Requirements
-
-- Raspberry Pi running Raspberry Pi OS (Bookworm or later)
-- Python 3.11+
-- [ntfy app](https://ntfy.sh) on your iPhone (free)
-
-## Installation
+After cloning this repository, run from the clone:
 
 ```bash
-git clone https://github.com/your-username/UnifiStockWatcher.git
-cd UnifiStockWatcher
-bash install_rpi.sh
+sudo bash install.sh
 ```
 
-The installer will:
-1. Create a Python virtual environment (`.venv/`)
-2. Install the `requests` dependency
-3. Create `settings.json` with your ntfy topic pre-filled
-4. Register a cron job that runs every hour
+This installs **both backend and frontend**, dependencies, a dedicated service
+account, and systemd services/timer. No additional upstream clone or patch is needed.
+The installer prints the URL to open for ntfy setup. Follow the Notifications guide,
+subscribe your phone, save and test, then add products on the Watch list. The default
+check interval is two minutes. The browser can be closed while monitoring continues.
 
-## Configuration
-
-### settings.json
-
-```json
-{
-  "region": "eu",
-  "ntfy_url": "https://ntfy.sh",
-  "ntfy_topic": "your-secret-topic",
-  "ntfy_priority": "high"
-}
-```
-
-| Field | Description |
-|-------|-------------|
-| `region` | Store region: `us`, `eu`, `uk`, `ca` |
-| `ntfy_url` | ntfy server URL (use `https://ntfy.sh` or your self-hosted instance) |
-| `ntfy_topic` | Your private ntfy topic — subscribe to it in the iPhone app |
-| `ntfy_priority` | Notification priority: `low`, `default`, `high`, `urgent` |
-
-### watched_items.json
-
-```json
-[
-  { "title": "Switch Pro 24", "slug": "usw-pro-24" },
-  { "title": "UniFi Express",  "slug": "ux" }
-]
-```
-
-Only `title` and `slug` are required. Use `list_products.py` to find slugs.
-
-## Usage
-
-### 1. Find products to watch
+The installer uses the machine's Tailscale IPv4 address when available, otherwise
+localhost. You can explicitly choose:
 
 ```bash
-# List all out-of-stock products (EU store)
-.venv/bin/python3 list_products.py --oos --region eu
-
-# Search by name
-.venv/bin/python3 list_products.py --search "pro"
-
-# Export as JSON (for scripting)
-.venv/bin/python3 list_products.py --oos --json
+sudo bash install.sh --localhost
+sudo bash install.sh --tailscale
 ```
 
-Copy the `slug` values you want into `watched_items.json`.
+For a headless server in localhost mode, forward port 8765 with SSH and open
+`http://localhost:8765/#notifications` on your computer. Run the same installer to
+upgrade; it preserves watch data/settings and creates a private backup under `/opt`.
+Existing timer overrides are archived so the GUI's interval takes effect. The
+installer restarts services and briefly pauses checks. Do not copy live settings
+or backup directories into your fork.
 
-### 2. Test notifications
+## Localhost or Tailscale only, intentionally
 
-```bash
-.venv/bin/python3 unifi_watcher.py --test
-```
+There is **no application login**. Both the installer and service launcher reject
+public/LAN/wildcard bind addresses. Anyone allowed to reach the interface can control
+it; use Tailscale access rules to limit access. This project does not configure
+Tailscale, firewall rules, HTTPS, public hosting, or a public reverse proxy. Do not
+expose it using Tailscale Funnel or another public proxy. A same-origin browser
+check blocks unrelated websites from submitting actions; it is not user authentication.
 
-Sends a test ntfy notification and checks your watched items.
+Basic ntfy.sh public topics need no account. The GUI explains optional accounts,
+Android/iPhone subscription, and self-hosted servers. It currently publishes without
+ntfy credentials; protected topics requiring publisher authentication are unsupported.
 
-### 3. Run manually
+## Files and troubleshooting
 
-```bash
-.venv/bin/python3 unifi_watcher.py --once
-```
+- Code: `/opt/unifi-stock-watcher/`; state: `/var/lib/unifi-stock-watcher/`.
+- Bind address/port: `/etc/unifi-stock-watcher-web.conf` (no credentials).
+- Watcher: `journalctl -u unifi-stock-watcher.service`.
+- Web GUI: `journalctl -u unifi-stock-watcher-web.service`.
+- Timer: `systemctl list-timers --all unifi-stock-watcher.timer`.
 
-Checks all watched items once, sends notifications for anything newly in stock, and exits.
+The store's public page format can change, so monitoring is best-effort. This
+Linux fork supports the included Linux setup, not the upstream Windows GUI.
 
-### 4. Cron (automatic)
+Offline backend checks (after installing Python dependencies):
+`python3 -m unittest discover -s tests -v`.
 
-The installer registers this cron entry automatically:
+## Maintenance and contributions
 
-```
-0 * * * * /home/pi/UnifiStockWatcher/.venv/bin/python3 /home/pi/UnifiStockWatcher/unifi_watcher.py --once >> /home/pi/UnifiStockWatcher/watcher.log 2>&1
-```
+This is a personal, AI-assisted project supplied as-is. **Pull requests will not be
+reviewed or merged.** Fork it and ask your own AI agent to update, fix, or adapt the
+project for your system. There is no promised support or compatibility with other
+operating systems or deployments.
 
-To edit the schedule: `crontab -e`
+## Credits and license
 
-## Project Structure
-
-```
-UnifiStockWatcher/
-├── unifi_core.py        # Store API, config, notifications, history
-├── unifi_watcher.py     # CLI watcher (--once for cron, --test, --setup)
-├── list_products.py     # One-shot product browser
-├── install_rpi.sh       # Raspberry Pi setup script
-├── requirements.txt     # Python dependencies
-├── LICENSE
-└── README.md
-```
-
-### Generated files (not tracked)
-
-| File | Purpose |
-|------|---------|
-| `watched_items.json` | Your watch list |
-| `settings.json` | ntfy config and region |
-| `stock_state.json` | Last known stock state per product (prevents duplicate notifications) |
-| `stock_history.json` | Full event log with statistics |
-| `.venv/` | Python virtual environment |
-
-## How It Works
-
-1. Fetches each category page from the Ubiquiti store
-2. Extracts product data from the embedded `__NEXT_DATA__` JSON in the HTML
-3. Parses variant `status` fields (`Available`, `SoldOut`, `ComingSoon`)
-4. Compares against the previous state saved in `stock_state.json`
-5. Sends an ntfy push notification for any product that transitioned to `Available`
-
-No authentication, scraping, or rate-limit-busting — standard HTTP requests with polite delays between category fetches.
-
-## License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
----
-
-*Forked from the original Windows GUI version and adapted for headless Raspberry Pi deployment.*
+MIT licensed. Based on [thefyfy/UnifiStockWatcher](https://github.com/thefyfy/UnifiStockWatcher),
+which derives from [jamesccupps/UnifiStockWatcher](https://github.com/jamesccupps/UnifiStockWatcher).
+See [LICENSE](LICENSE), [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), and
+[the preserved upstream MIT notice](licenses/upstream-MIT.txt).

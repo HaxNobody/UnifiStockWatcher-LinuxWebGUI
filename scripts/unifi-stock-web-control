@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+TIMER="unifi-stock-watcher.timer"
+SERVICE="unifi-stock-watcher.service"
+DATA_DIR="/var/lib/unifi-stock-watcher"
+PYTHON="/opt/unifi-stock-watcher/venv/bin/python3"
+
+[[ ${EUID:-$(id -u)} -eq 0 ]] || { echo "ERROR: root is required" >&2; exit 1; }
+
+case "${1:-}" in
+    status)
+        timer_state="$(systemctl is-active "$TIMER" 2>/dev/null || true)"
+        timer_enabled="$(systemctl is-enabled "$TIMER" 2>/dev/null || true)"
+        service_state="$(systemctl is-active "$SERVICE" 2>/dev/null || true)"
+        service_result="$(systemctl show "$SERVICE" -p Result --value 2>/dev/null || true)"
+        last_trigger="$(systemctl show "$TIMER" -p LastTriggerUSec --value 2>/dev/null || true)"
+        next_run="$(systemctl show "$TIMER" -p NextElapseUSecRealtime --value 2>/dev/null || true)"
+        last_run="$(systemctl show "$SERVICE" -p ExecMainExitTimestamp --value 2>/dev/null || true)"
+        interval="$($PYTHON - "$DATA_DIR/settings.json" <<'PY'
+import json, sys
+try:
+    print(int(json.load(open(sys.argv[1])).get("poll_interval", 120)))
+except Exception:
+    print(120)
+PY
+)"
+        printf 'timer_active=%s\ntimer_enabled=%s\nservice_active=%s\nservice_result=%s\ninterval=%s\nlast_trigger=%s\nlast_run=%s\nnext_run=%s\n' \
+            "$timer_state" "$timer_enabled" "$service_state" "$service_result" \
+            "$interval" "$last_trigger" "$last_run" "$next_run"
+        ;;
+    start)
+        systemctl enable --now "$TIMER"
+        ;;
+    stop)
+        systemctl disable --now "$TIMER"
+        ;;
+    check)
+        systemctl start --no-block "$SERVICE"
+        ;;
+    logs)
+        lines="${2:-300}"
+        [[ "$lines" =~ ^[0-9]+$ ]] && (( lines >= 20 && lines <= 2000 )) || {
+            echo "ERROR: log line count must be 20-2000" >&2
+            exit 2
+        }
+        journalctl -u "$SERVICE" -n "$lines" --no-pager --output=short-iso
+        ;;
+    interval)
+        seconds="${2:-}"
+        [[ "$seconds" =~ ^[0-9]+$ ]] && (( seconds >= 15 && seconds <= 86400 )) || {
+            echo "ERROR: interval must be 15-86400 seconds" >&2
+            exit 2
+        }
+        install -d -o root -g root -m 0755 "/etc/systemd/system/$TIMER.d"
+        printf '[Timer]\nOnActiveSec=\nOnBootSec=\nOnStartupSec=\nOnUnitActiveSec=\nOnUnitInactiveSec=\nOnCalendar=\nOnBootSec=2min\nOnUnitActiveSec=%ss\n' "$seconds" \
+            > "/etc/systemd/system/$TIMER.d/interval.conf"
+        chmod 0644 "/etc/systemd/system/$TIMER.d/interval.conf"
+        systemctl daemon-reload
+        if systemctl is-enabled --quiet "$TIMER"; then
+            systemctl restart "$TIMER"
+        fi
+        ;;
+    *)
+        echo "ERROR: allowed commands: status, start, stop, check, logs [LINES], interval SECONDS" >&2
+        exit 2
+        ;;
+esac

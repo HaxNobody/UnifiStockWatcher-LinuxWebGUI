@@ -1,0 +1,34 @@
+[Unit]
+Description=UniFi Stock Watcher browser control panel
+After=network-online.target tailscaled.service
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=unifistock
+Group=unifistock
+WorkingDirectory=/opt/unifi-stock-watcher/web
+Environment=UNIFI_WATCHER_APP_DIR=/opt/unifi-stock-watcher/app
+Environment=UNIFI_WATCHER_DATA_DIR=/var/lib/unifi-stock-watcher
+EnvironmentFile=/etc/unifi-stock-watcher-web.conf
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TZ=UTC
+ExecStart=/opt/unifi-stock-watcher/venv/bin/python3 /opt/unifi-stock-watcher/scripts/run-web.py
+Restart=on-failure
+RestartSec=3s
+NoNewPrivileges=false
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/var/lib/unifi-stock-watcher /etc/systemd/system/unifi-stock-watcher.timer.d
+
+[Install]
+WantedBy=multi-user.target

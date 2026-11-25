@@ -3,13 +3,15 @@ Unifi Stock Watcher — Core Module
 Shared store API, configuration, notifications, price & stock history.
 """
 
+import os
+import tempfile
 import re
 import sys
 import json
 import time
 import threading
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 try:
     import requests
@@ -20,10 +22,27 @@ except ImportError:
 # ── Paths ────────────────────────────────────────────────────────────────────
 
 BASE_DIR       = Path(__file__).parent
-CONFIG_FILE    = BASE_DIR / "watched_items.json"
-SETTINGS_FILE  = BASE_DIR / "settings.json"
-HISTORY_FILE   = BASE_DIR / "stock_history.json"
-STATE_FILE     = BASE_DIR / "stock_state.json"
+DATA_DIR       = Path(os.environ.get("UNIFI_WATCHER_DATA_DIR", BASE_DIR))
+CONFIG_FILE    = DATA_DIR / "watched_items.json"
+SETTINGS_FILE  = DATA_DIR / "settings.json"
+HISTORY_FILE   = DATA_DIR / "stock_history.json"
+STATE_FILE     = DATA_DIR / "stock_state.json"
+
+
+def atomic_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
 
 # ── Store constants ──────────────────────────────────────────────────────────
 
@@ -83,7 +102,7 @@ def _extract_next_data(html):
 # ── Default settings ─────────────────────────────────────────────────────────
 
 DEFAULT_SETTINGS = {
-    "poll_interval":  3600,
+    "poll_interval":  120,
     "region":         "us",
     "max_retries":    3,
     "ntfy_url":       "https://ntfy.sh",
@@ -106,7 +125,7 @@ def load_settings():
 
 
 def save_settings(s):
-    SETTINGS_FILE.write_text(json.dumps(s, indent=2))
+    atomic_json(SETTINGS_FILE, s)
 
 
 # ── Store API ────────────────────────────────────────────────────────────────
@@ -142,6 +161,8 @@ def fetch_all_products(region="us", progress_cb=None, error_cb=None):
             progress_cb(int((i + 1) / len(CATEGORIES) * 100))
         time.sleep(0.3)
     print(f"[UnifiWatcher] Fetched {len(products)} unique products across {len(CATEGORIES)} categories")
+    if not products:
+        raise RuntimeError("No product data found; the store page format may have changed")
     return list(products.values())
 
 
@@ -194,8 +215,10 @@ def check_slug(slug, region="us", retries=3):
             pp       = data.get("props", {}).get("pageProps", {})
             products = pp.get("collection", {}).get("products", [])
             if not products:
-                return False, None
-            product  = next((p for p in products if p.get("slug") == slug), products[0])
+                raise RuntimeError(f"No product data found for {slug}")
+            product = next((p for p in products if p.get("slug") == slug), None)
+            if product is None:
+                raise RuntimeError(f"Product {slug} was not found in the store response")
             variants = product.get("variants", [])
             in_stock = any(v.get("status") == "Available" for v in variants)
             price    = None
@@ -230,7 +253,7 @@ def load_watched():
 
 
 def save_watched(items):
-    CONFIG_FILE.write_text(json.dumps(items, indent=2))
+    atomic_json(CONFIG_FILE, items)
 
 
 # ── Stock history ────────────────────────────────────────────────────────────
@@ -255,7 +278,7 @@ class StockHistory:
         # Keep only last 2000 events to prevent unbounded growth
         if len(self._data["events"]) > 2000:
             self._data["events"] = self._data["events"][-2000:]
-        self._path.write_text(json.dumps(self._data, indent=2))
+        atomic_json(self._path, self._data)
 
     def record_check(self, slug, title, in_stock, price=None):
         with self._lock:
@@ -263,7 +286,7 @@ class StockHistory:
             if in_stock:
                 self._data["stats"]["in_stock_alerts"] += 1
             self._data["events"].append({
-                "ts":       datetime.now().isoformat(),
+                "ts":       datetime.now(timezone.utc).isoformat(),
                 "slug":     slug,
                 "title":    title,
                 "in_stock": in_stock,
@@ -324,13 +347,14 @@ def notify_ntfy(title, message, settings=None, click_url=None):
             headers["Click"]   = click_url
             headers["Actions"] = f"view, Open Store, {click_url}"
 
-        requests.post(
+        response = requests.post(
             f"{ntfy_url}/{ntfy_topic}",
             data=message.encode("utf-8"),
             headers=headers,
             timeout=10,
         )
-        print(f"  [ntfy] Notification sent: {title}")
+        response.raise_for_status()
+        print(f"  [ntfy] Notification accepted: {title}")
     except Exception as e:
         print(f"  [ntfy] Notification failed: {e}")
         print(f"  *** ALERT: {title} — {message}")
@@ -361,3 +385,4 @@ def import_watchlist(filepath):
             added += 1
     save_watched(existing)
     return added
+

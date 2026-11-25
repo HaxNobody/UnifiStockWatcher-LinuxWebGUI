@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic UniFi Store stock check
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+AccuracySec=5s
+Unit=unifi-stock-watcher.service
+
+[Install]
+WantedBy=timers.target

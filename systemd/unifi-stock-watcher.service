@@ -1,0 +1,25 @@
+[Unit]
+Description=UniFi Store stock check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=unifistock
+Group=unifistock
+WorkingDirectory=/opt/unifi-stock-watcher/app
+Environment=UNIFI_WATCHER_DATA_DIR=/var/lib/unifi-stock-watcher
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=TZ=UTC
+ExecStart=/opt/unifi-stock-watcher/venv/bin/python3 /opt/unifi-stock-watcher/app/unifi_watcher.py --once
+TimeoutStartSec=10min
+Nice=10
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/unifi-stock-watcher
+
