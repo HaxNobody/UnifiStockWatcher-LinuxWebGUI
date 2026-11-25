@@ -44,60 +44,7 @@ def atomic_json(path, value):
         if os.path.exists(name):
             os.unlink(name)
 
-# ── Store constants ──────────────────────────────────────────────────────────
-
-STORE_REGIONS = {
-    "us": {"label": "United States", "path": "us/en"},
-    "eu": {"label": "Europe",        "path": "eu/en"},
-    "uk": {"label": "United Kingdom", "path": "uk/en"},
-    "ca": {"label": "Canada",        "path": "ca/en"},
-}
-
-STORE_BASE = "https://store.ui.com"
-
-CATEGORIES = [
-    "category/all-cloud-gateways",
-    "category/all-switching",
-    "category/all-wifi",
-    "category/all-cameras-nvrs",
-    "category/all-door-access",
-    "category/all-integrations",
-    "category/all-advanced-hosting",
-    "category/accessories-cables-dacs",
-    "category/network-storage",
-]
-
-CATEGORY_LABELS = {
-    "category/all-cloud-gateways":      "Cloud Gateways",
-    "category/all-switching":           "Switching",
-    "category/all-wifi":                "WiFi",
-    "category/all-cameras-nvrs":        "Cameras & NVRs",
-    "category/all-door-access":         "Door Access",
-    "category/all-integrations":        "Integrations",
-    "category/all-advanced-hosting":    "Advanced Hosting",
-    "category/accessories-cables-dacs": "Accessories, Cables & DACs",
-    "category/network-storage":         "Network Storage",
-}
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-}
-
-_NEXT_DATA_RE = re.compile(
-    r'<script id="__NEXT_DATA__" type="application/json">(.+?)</script>',
-    re.DOTALL,
-)
-
-
-def _extract_next_data(html):
-    m = _NEXT_DATA_RE.search(html)
-    if not m:
-        raise RuntimeError("__NEXT_DATA__ not found in page")
-    return json.loads(m.group(1))
+import store_api as store
 
 # ── Default settings ─────────────────────────────────────────────────────────
 
@@ -115,7 +62,7 @@ DEFAULT_SETTINGS = {
 def load_settings():
     if SETTINGS_FILE.exists():
         try:
-            s = json.loads(SETTINGS_FILE.read_text())
+            s = json.loads(SETTINGS_FILE.read_text(encoding="utf-8-sig"))
             merged = DEFAULT_SETTINGS.copy()
             merged.update(s)
             return merged
@@ -128,120 +75,13 @@ def save_settings(s):
     atomic_json(SETTINGS_FILE, s)
 
 
-# ── Store API ────────────────────────────────────────────────────────────────
-
-def fetch_all_products(region="us", progress_cb=None, error_cb=None):
-    """Fetch all products from every category, deduplicated. Returns list of dicts."""
-    products = {}
-    region_path = STORE_REGIONS[region]["path"]
-    for i, cat in enumerate(CATEGORIES):
-        url = f"{STORE_BASE}/{region_path}/{cat}"
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            r.raise_for_status()
-            data = _extract_next_data(r.text)
-            pp   = data.get("props", {}).get("pageProps", {})
-            for subcat in pp.get("subCategories", []):
-                for p in subcat.get("products", []):
-                    if p.get("slug"):
-                        p["_category"] = cat
-                        products[p["slug"]] = p
-            for p in pp.get("products", []):
-                if p.get("slug"):
-                    p.setdefault("_category", cat)
-                    products.setdefault(p["slug"], p)
-        except Exception as e:
-            print(f"[UnifiWatcher] Category fetch failed: {cat} — {e}")
-            if error_cb:
-                try:
-                    error_cb(cat, e)
-                except Exception:
-                    pass
-        if progress_cb:
-            progress_cb(int((i + 1) / len(CATEGORIES) * 100))
-        time.sleep(0.3)
-    print(f"[UnifiWatcher] Fetched {len(products)} unique products across {len(CATEGORIES)} categories")
-    if not products:
-        raise RuntimeError("No product data found; the store page format may have changed")
-    return list(products.values())
-
-
-def is_available(product):
-    return any(v.get("status") == "Available" for v in product.get("variants", []))
-
-
-def _format_price(price_val):
-    """Format a price value which may be a Money dict, number, or string."""
-    if isinstance(price_val, str):
-        return price_val
-    if isinstance(price_val, dict):
-        amount   = price_val.get("amount", 0)
-        currency = price_val.get("currency", "USD")
-        symbols  = {"USD": "$", "EUR": "€", "GBP": "£", "CAD": "C$",
-                     "AUD": "A$", "SEK": "", "NOK": "", "DKK": ""}
-        sym = symbols.get(currency, "")
-        formatted = f"{amount / 100:,.2f}"
-        if sym:
-            return f"{sym}{formatted}"
-        return f"{formatted} {currency}"
-    if isinstance(price_val, (int, float)):
-        return f"${price_val:,.2f}"
-    return str(price_val)
-
-
-def get_price(product):
-    """Extract the display price from a product dict.
-    displayPrice can be a Money dict like {'amount': 39900, 'currency': 'USD'}
-    or a plain number or string.
-    """
-    for v in product.get("variants", []):
-        price = v.get("displayPrice") or v.get("price")
-        if price is not None:
-            return _format_price(price)
-    return None
-
-
-def check_slug(slug, region="us", retries=3):
-    """Check if a product slug is in stock. Returns (in_stock: bool, price: str|None)."""
-    region_path = STORE_REGIONS[region]["path"]
-    url = f"{STORE_BASE}/{region_path}/products/{slug}"
-
-    last_err = None
-    for attempt in range(retries):
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            r.raise_for_status()
-            data     = _extract_next_data(r.text)
-            pp       = data.get("props", {}).get("pageProps", {})
-            products = pp.get("collection", {}).get("products", [])
-            if not products:
-                raise RuntimeError(f"No product data found for {slug}")
-            product = next((p for p in products if p.get("slug") == slug), None)
-            if product is None:
-                raise RuntimeError(f"Product {slug} was not found in the store response")
-            variants = product.get("variants", [])
-            in_stock = any(v.get("status") == "Available" for v in variants)
-            price    = None
-            for v in variants:
-                p = v.get("displayPrice") or v.get("price")
-                if p is not None:
-                    price = _format_price(p)
-                    break
-            return in_stock, price
-        except Exception as e:
-            last_err = e
-            if attempt < retries - 1:
-                time.sleep(2 ** attempt)
-
-    raise last_err or RuntimeError(f"Failed to check {slug} after {retries} attempts")
-
-
 # ── Config load/save ─────────────────────────────────────────────────────────
 
 def load_watched():
     if CONFIG_FILE.exists():
         try:
-            data = json.loads(CONFIG_FILE.read_text())
+            data = json.loads(CONFIG_FILE.read_text(encoding="utf-8-sig"))
+            data = [dict(item, title=str(item.get("title") or item["slug"])) for item in data if isinstance(item,dict) and store.is_valid_slug(item.get("slug"))] if isinstance(data,list) else []
             for item in data:
                 item.setdefault("favourite", False)
                 item.setdefault("price", None)
@@ -322,44 +162,6 @@ class StockHistory:
 stock_history = StockHistory()
 
 
-# ── Notification ─────────────────────────────────────────────────────────────
-
-def notify_ntfy(title, message, settings=None, click_url=None):
-    """Send a push notification via ntfy (https://ntfy.sh or self-hosted)."""
-    if settings is None:
-        settings = load_settings()
-    ntfy_url   = settings.get("ntfy_url", "").rstrip("/")
-    ntfy_topic = settings.get("ntfy_topic", "")
-    priority   = settings.get("ntfy_priority", "high")
-
-    if not ntfy_url or not ntfy_topic:
-        print(f"  [ntfy] Not configured — set ntfy_url and ntfy_topic in settings.json")
-        print(f"  *** ALERT: {title} — {message}")
-        return
-
-    try:
-        headers = {
-            "Title":    title,
-            "Priority": priority,
-            "Tags":     "bell,white_check_mark",
-        }
-        if click_url:
-            headers["Click"]   = click_url
-            headers["Actions"] = f"view, Open Store, {click_url}"
-
-        response = requests.post(
-            f"{ntfy_url}/{ntfy_topic}",
-            data=message.encode("utf-8"),
-            headers=headers,
-            timeout=10,
-        )
-        response.raise_for_status()
-        print(f"  [ntfy] Notification accepted: {title}")
-    except Exception as e:
-        print(f"  [ntfy] Notification failed: {e}")
-        print(f"  *** ALERT: {title} — {message}")
-
-
 # ── Export / Import ──────────────────────────────────────────────────────────
 
 def export_watchlist(filepath):
@@ -385,4 +187,28 @@ def import_watchlist(filepath):
             added += 1
     save_watched(existing)
     return added
+
+
+# Compatibility layer for the Linux and web callers.
+import store_api as store
+STORE_REGIONS=store.STORE_REGIONS
+STORE_BASE=store.STORE_BASE
+CATEGORIES=store.CATEGORIES
+CATEGORY_LABELS=store.CATEGORY_LABELS
+is_available=store.is_available
+get_price=store.get_price
+def fetch_all_products(region="us", progress_cb=None, error_cb=None):
+    store.load_pages()
+    try:
+        build=store.get_build_id(region)
+        store.refresh_category_coverage(build,region)
+        products=store.fetch_all_products(build,region,progress_cb,error_cb)
+        if not products: raise store.StoreError('Store returned no products; check its page format')
+        return products
+    finally: store.save_pages()
+def check_slug(slug, region="us", retries=3):
+    return store.check_slug(store.get_build_id(region),slug,region,retries)
+def notify_ntfy(title,message,settings=None,click_url=None):
+    from monitor import notify
+    return notify(title,message,settings,click_url)
 

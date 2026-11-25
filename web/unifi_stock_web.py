@@ -17,6 +17,7 @@ from pathlib import Path
 
 from flask import Flask, Response, jsonify, redirect, render_template, request, url_for
 import requests
+import uuid
 
 
 APP_DIR = Path(os.environ.get("UNIFI_WATCHER_APP_DIR", "/opt/unifi-stock-watcher/app"))
@@ -26,6 +27,9 @@ DEMO = os.environ.get("UNIFI_WEB_DEMO") == "1"
 
 if APP_DIR.exists():
     sys.path.insert(0, str(APP_DIR))
+
+import monitor
+import store_api as store
 
 try:
     from unifi_core import (  # type: ignore
@@ -73,7 +77,7 @@ app.config["MAX_CONTENT_LENGTH"] = 1024 * 1024
 _catalog_lock = threading.Lock()
 _data_lock = threading.Lock()
 _catalog_cache: dict[str, object] = {"region": None, "at": 0.0, "products": []}
-WEB_VERSION = "1.3.0"
+WEB_VERSION = "1.4.0"
 
 
 DEMO_WATCHED = [
@@ -87,7 +91,7 @@ DEMO_WATCHED = [
 
 def _json(path: Path, fallback):
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, TypeError):
         return fallback
 
@@ -116,6 +120,7 @@ def _watched():
         saved = state.get(item.get("slug"), {})
         item["in_stock"] = saved.get("in_stock")
         item["last_checked"] = saved.get("last_checked")
+        for key in ("coming_soon", "restock_note", "sold_out_note", "check_error"): item[key]=saved.get(key)
         if not item.get("price") and saved.get("price"):
             item["price"] = saved["price"]
     return items
@@ -165,7 +170,9 @@ def _history():
             ],
             "stats": {"total_checks": 16, "in_stock_alerts": 1},
         }
-    return _json(DATA_DIR / "stock_history.json", {"events": [], "stats": {}})
+    history=_json(DATA_DIR / "stock_history.json", {"events": [], "stats": {}})
+    history['stats']=_json(DATA_DIR / 'check_counts.json',history.get('stats',{}))
+    return history
 
 
 def _run_control(*args: str, timeout: int = 15):
@@ -240,7 +247,10 @@ def _catalog_product(product):
     category = product.get("_category", "")
     return {
         "slug": product.get("slug", ""),
-        "title": product.get("title") or product.get("name") or product.get("slug", ""),
+        "title": store.product_title(product),
+        "coming_soon": store.is_coming_soon(product),
+        "restock_note": store.describe_restock(product),
+        "sold_out_note": store.describe_sold_out_for(product),
         "category": CATEGORY_LABELS.get(category, category.replace("category/", "").replace("-", " ").title()),
         "price": get_price(product),
         "in_stock": is_available(product),
@@ -287,7 +297,7 @@ def bootstrap():
     settings = _settings()
     return jsonify(
         watched=_watched(),
-        settings=settings,
+        settings=public_settings(settings),
         status=_status(),
         regions={key: value["label"] for key, value in STORE_REGIONS.items()},
         history=_history(),
@@ -322,7 +332,7 @@ def replace_watchlist():
     for item in items:
         slug = str(item.get("slug", "")).strip()
         title = str(item.get("title", "")).strip()
-        if not slug or not title or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-" for c in slug):
+        if not store.is_valid_slug(slug) or not title:
             return jsonify(error=f"Invalid product: {title or slug}"), 400
         clean.append({
             "title": title[:240],
@@ -333,68 +343,17 @@ def replace_watchlist():
             "added_at": item.get("added_at") or datetime.now(timezone.utc).isoformat(),
         })
     if not DEMO:
-        _atomic_json(DATA_DIR / "watched_items.json", clean)
+        with monitor.data_lock(): _atomic_json(DATA_DIR / "watched_items.json", clean)
     return jsonify(watched=clean)
 
 
 @app.post("/api/items/<slug>/check")
 def check_item(slug):
-    item = next((entry for entry in _watched() if entry.get("slug") == slug), None)
-    if not item:
-        return jsonify(error="That product is not on the watch list."), 404
+    if not any(i.get("slug")==slug for i in _watched()): return jsonify(error="Product is not watched"),404
     try:
-        settings = _settings()
-        in_stock, price = check_slug(slug, settings.get("region", "us"), settings.get("max_retries", 3))
-        now = datetime.now(timezone.utc).isoformat()
-        previous = _state().get(slug, {})
-        if not DEMO:
-            with _data_lock:
-                state = _state()
-                previous = state.get(slug, {})
-                state[slug] = {"in_stock": in_stock, "last_checked": now, "price": price}
-                _atomic_json(DATA_DIR / "stock_state.json", state)
-
-                history = _history()
-                history.setdefault("events", []).append({
-                    "ts": now,
-                    "slug": slug,
-                    "title": item["title"],
-                    "in_stock": in_stock,
-                    "price": price,
-                })
-                stats = history.setdefault("stats", {})
-                stats["total_checks"] = int(stats.get("total_checks", 0)) + 1
-                if in_stock and previous.get("in_stock") is False:
-                    stats["in_stock_alerts"] = int(stats.get("in_stock_alerts", 0)) + 1
-                history["events"] = history["events"][-2000:]
-                _atomic_json(DATA_DIR / "stock_history.json", history)
-
-                watched = _json(DATA_DIR / "watched_items.json", [])
-                for entry in watched:
-                    if entry.get("slug") == slug and price:
-                        entry["price"] = price
-                        break
-                _atomic_json(DATA_DIR / "watched_items.json", watched)
-
-            wants_alert = (
-                settings.get("ntfy_enabled", True)
-                and not item.get("muted", False)
-                and (
-                    not settings.get("alert_favourites_only", False)
-                    or item.get("favourite", False)
-                )
-            )
-            if in_stock and previous.get("in_stock") is False and wants_alert:
-                path = STORE_REGIONS[settings.get("region", "us")]["path"]
-                notify_ntfy(
-                    f"IN STOCK: {item['title']}",
-                    f"{item['title']} is now available{f' ({price})' if price else ''}!",
-                    settings,
-                    click_url=f"https://store.ui.com/{path}/products/{slug}",
-                )
-        return jsonify(ok=True, in_stock=in_stock, price=price, checked_at=now)
-    except Exception as exc:
-        return jsonify(error=str(exc)), 502
+        stock,price=monitor.check_one(slug)
+        return jsonify(ok=True,in_stock=stock,price=price)
+    except Exception as error: return jsonify(error=str(error)),502
 
 
 @app.put("/api/settings")
@@ -405,11 +364,13 @@ def save_settings():
     allowed = {
         "region", "poll_interval", "ntfy_url", "ntfy_topic", "ntfy_priority", "ntfy_enabled",
         "max_retries", "alert_favourites_only", "price_drop_alerts", "theme",
-        "accent", "text_size",
+        "accent", "text_size", "ntfy_token",
     }
     for key in allowed:
         if key in incoming:
+            if key == "ntfy_token" and not incoming[key]: continue
             current[key] = incoming[key]
+    if incoming.get("clear_ntfy_token"): current.pop("ntfy_token", None)
     region = str(current.get("region", "us"))
     if region not in STORE_REGIONS:
         return jsonify(error="Invalid store region."), 400
@@ -426,14 +387,26 @@ def save_settings():
     current["max_retries"] = retries
     current["ntfy_url"] = str(current.get("ntfy_url", "")).strip().rstrip("/")
     current["ntfy_topic"] = str(current.get("ntfy_topic", "")).strip()
+    from urllib.parse import urlsplit
+    import re
+    server=urlsplit(current['ntfy_url'])
+    if current['ntfy_url'] and (server.scheme not in {'http','https'} or not server.hostname or server.username or server.password or server.query or server.fragment):
+        return jsonify(error='Use an http(s) ntfy server URL without credentials or query parameters'),400
+    if current['ntfy_topic'] and not re.fullmatch(r'[A-Za-z0-9_-]{1,64}',current['ntfy_topic']):
+        return jsonify(error='Invalid ntfy topic'),400
+    token=current.get('ntfy_token','')
+    if not isinstance(token,str) or len(token)>2048 or any(ord(c)<33 or ord(c)>126 for c in token):
+        return jsonify(error='Invalid ntfy access token'),400
     if not DEMO:
-        _atomic_json(DATA_DIR / "settings.json", current)
+        with monitor.data_lock():
+            if region != old_region: current["region_revision"] = uuid.uuid4().hex
+            _atomic_json(DATA_DIR / "settings.json", current)
+            if region != old_region: _atomic_json(DATA_DIR / "stock_state.json", {})
         if region != old_region:
-            _atomic_json(DATA_DIR / "stock_state.json", {})
             with _catalog_lock:
                 _catalog_cache.update(region=None, at=0.0, products=[])
         _run_control("interval", str(interval))
-    return jsonify(settings=current, status=_status())
+    return jsonify(settings=public_settings(current), status=_status())
 
 
 @app.post("/api/action/<action>")
@@ -447,17 +420,7 @@ def action(action):
             topic = str(settings.get("ntfy_topic", ""))
             if not ntfy_url or not topic:
                 raise RuntimeError("Configure the ntfy server and topic first.")
-            response = requests.post(
-                f"{ntfy_url}/{topic}",
-                data="Sent from the browser control panel.".encode("utf-8"),
-                headers={
-                    "Title": "TEST: UniFi Stock Watcher works!",
-                    "Priority": str(settings.get("ntfy_priority", "high")),
-                    "Tags": "bell,white_check_mark",
-                },
-                timeout=10,
-            )
-            response.raise_for_status()
+            monitor.notify("TEST: UniFi Stock Watcher works!", "Sent from the browser control panel.", settings)
         else:
             _run_control(action)
         return jsonify(ok=True, status=_status())
@@ -479,19 +442,33 @@ def logs():
 @app.delete("/api/history")
 def clear_history():
     if not DEMO:
-        _atomic_json(DATA_DIR / "stock_history.json", {"events": [], "stats": {"total_checks": 0, "in_stock_alerts": 0}})
+        with monitor.data_lock():
+            _atomic_json(DATA_DIR / "stock_history.json", {"events": [], "stats": {}})
+            _atomic_json(DATA_DIR / "check_counts.json", {})
     return jsonify(ok=True)
+
+
+def csv_safe(value):
+    text = str(value or "")
+    return "'" + text if text.lstrip().startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")) else text
+
+
+def public_settings(settings):
+    result=dict(settings)
+    result["has_ntfy_token"]=bool(result.pop("ntfy_token", ""))
+    return result
 
 
 @app.get("/api/history.csv")
 def export_history():
     stream = io.StringIO()
     writer = csv.writer(stream)
-    writer.writerow(["When", "Product", "Slug", "Change", "Price"])
+    writer.writerow(["When", "Product", "Slug", "Change", "Price", "Previous price"])
     for event in reversed(_history().get("events", [])):
         writer.writerow([
-            event.get("ts", ""), event.get("title", ""), event.get("slug", ""),
-            "In stock" if event.get("in_stock") else "Sold out", event.get("price", ""),
+            csv_safe(event.get("ts", "")), csv_safe(event.get("title", "")), csv_safe(event.get("slug", "")),
+            "In stock" if event.get("in_stock") else "Sold out", csv_safe(event.get("price", "")),
+            csv_safe(event.get("price_was", "")),
         ])
     return Response("\ufeff" + stream.getvalue(), mimetype="text/csv", headers={"Content-Disposition": "attachment; filename=unifi-stock-history.csv"})
 

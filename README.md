@@ -48,8 +48,17 @@ expose it using Tailscale Funnel or another public proxy. A same-origin browser
 check blocks unrelated websites from submitting actions; it is not user authentication.
 
 Basic ntfy.sh public topics need no account. The GUI explains optional accounts,
-Android/iPhone subscription, and self-hosted servers. It currently publishes without
-ntfy credentials; protected topics requiring publisher authentication are unsupported.
+Android/iPhone subscription, self-hosted servers, and protected topics using an ntfy
+access token. Saved tokens stay on the server and are not returned to browsers.
+Delivery retries transient failures; a successful test means server acceptance,
+not proof that the phone received it.
+
+Version 1.4.0 updates category discovery, renamed-product/redirect handling, restock
+estimates, and coming-soon labels. Catalog ETags survive service restarts. The
+watcher backs off store failures for up to 30 minutes even though the systemd timer
+continues to run. History stores changes rather than every unchanged result;
+separate small counters retain total checks. Old history remains readable.
+See [CHANGELOG.md](CHANGELOG.md) for provenance and the full update notes.
 
 ## Files and troubleshooting
 

@@ -82,7 +82,7 @@ for attempt in range(10):
         time.sleep(1)
 PY
 trap - ERR
-printf '\nInstalled UniFi Stock Watcher 1.3.0.\nOpen this URL for ntfy setup:\n  %s#notifications\n' "$URL"
+printf '\nInstalled UniFi Stock Watcher 1.4.0.\nOpen this URL for ntfy setup:\n  %s#notifications\n' "$URL"
 printf '\nThen use Add products on the Watch list. No password is required.\n'
 if [[ "$URL" == http://127.0.0.1:* ]]; then
     printf 'Localhost mode: open the URL on this server, or use an SSH tunnel.\n'
